@@ -542,8 +542,8 @@ void cublasINT8MMWrapper::SpGemm(
     int alg = cublas_algo_map_->getSpAlgo(1, num_A_rows, num_B_cols, num_A_cols);
     CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
         &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_ALG_CONFIG_ID, &alg, sizeof(alg)))
-    size_t workspace_size;
-    CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&cusparselt_handle_, &alg_sel, &workspace_size))
+    size_t workspace_size = 0;
+//    CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&cusparselt_handle_, &alg_sel, &workspace_size))
     CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&cusparselt_handle_, &plan, &matmul, &alg_sel, workspace_size))
 
     void*        d_workspace = nullptr;

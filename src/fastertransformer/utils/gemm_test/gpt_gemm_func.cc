@@ -548,8 +548,8 @@ void generate_gpt_gemm_config(int   batch_size,
                             cusparseLtMatmulAlgSelectionInit(&handle, &alg_sel, &matmul, CUSPARSELT_MATMUL_ALG_DEFAULT))
                         CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
                             &handle, &alg_sel, CUSPARSELT_MATMUL_ALG_CONFIG_ID, &alg, sizeof(alg)))
-                        size_t workspace_size;
-                        CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&handle, &alg_sel, &workspace_size))
+                        size_t workspace_size = 0;
+//                        CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&handle, &alg_sel, &workspace_size))
                         CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&handle, &plan, &matmul, &alg_sel, workspace_size))
                         CHECK_CUSPARSE(cusparseLtMatmul(&handle,
                                                         &plan,

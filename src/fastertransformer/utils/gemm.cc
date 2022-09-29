@@ -973,8 +973,8 @@ void SpGemm::gemm(const GemmOp   transa,
     int alg = cublas_algo_map_->getSpAlgo(1, a_rows, b_cols, a_cols);
     CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
         &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_ALG_CONFIG_ID, &alg, sizeof(alg)));
-    size_t workspace_size;
-    CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&cusparselt_handle_, &alg_sel, &workspace_size));
+    size_t workspace_size = 0;
+//    CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&cusparselt_handle_, &alg_sel, &workspace_size));
     CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&cusparselt_handle_, &plan, &matmul, &alg_sel, workspace_size));
 
     void*        d_workspace = nullptr;  // Can we use the workspace of the class?
