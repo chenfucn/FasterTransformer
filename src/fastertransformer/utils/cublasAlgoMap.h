@@ -39,6 +39,10 @@ typedef struct {
     float exec_time;
 } cublasLtMatmulAlgo_info;
 
+typedef struct {
+    int algoId, splitK, splitKMode, splitBufs;
+} cusparseLtMatmulAlgo_info;
+
 /* Structure to store information about different run trials */
 typedef struct {
     cublasLtMatmulAlgo_t      algo;
@@ -53,10 +57,10 @@ typedef struct {
 
 class cublasAlgoMap {
 private:
-    std::map<std::string, cublasLtMatmulAlgo_info> algo_map_;
-    std::string                                    config_filename_;
-    std::string                                    sp_config_filename_;
-    std::map<std::string, int>                     sp_algo_map_;
+    std::string                                      config_filename_;
+    std::string                                      sp_config_filename_;
+    std::map<std::string, cublasLtMatmulAlgo_info>   algo_map_;
+    std::map<std::string, cusparseLtMatmulAlgo_info> sp_algo_map_;
 
 public:
     explicit cublasAlgoMap(const std::string filename, const std::string sp_config_filename = "");
@@ -64,7 +68,8 @@ public:
     ~cublasAlgoMap();
     void loadGemmConfig();
     void loadSpGemmConfig();
-    int  getSpAlgo(const int batch_count, const int m, const int n, const int k);
+    cusparseLtMatmulAlgo_info
+    getSpAlgo(const int batch_count, const int m, const int n, const int k);
     bool isUseSparse(const int batch_count, const int m, const int n, const int k);
 
     bool isExist(const int batch_count, const int m, const int n, const int k, const CublasDataType data_type);

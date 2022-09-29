@@ -696,11 +696,19 @@ void cublasMMWrapper::SpGemm(cublasOperation_t transa,
     mu_->lock();
     CHECK_CUSPARSE(
         cusparseLtMatmulAlgSelectionInit(&cusparselt_handle_, &alg_sel, &matmul, CUSPARSELT_MATMUL_ALG_DEFAULT))
-    int alg = cublas_algo_map_->getSpAlgo(1, num_A_rows, num_B_cols, num_A_cols);
-    CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
-        &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_ALG_CONFIG_ID, &alg, sizeof(alg)))
-    size_t workspace_size;
-    CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&cusparselt_handle_, &alg_sel, &workspace_size))
+    cusparseLtMatmulAlgo_info alginfo = cublas_algo_map_->getSpAlgo(1, num_A_rows, num_B_cols, num_A_cols);
+    if (alginfo.algoId >= 0){
+        CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
+            &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_ALG_CONFIG_ID, &(alginfo.algoId), sizeof(alginfo.algoId)))
+        CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
+            &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_SPLIT_K, &(alginfo.splitK), sizeof(alginfo.splitK)))
+        cusparseLtSplitKMode_t splitKMode = (cusparseLtSplitKMode_t)alginfo.splitKMode;
+        CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
+            &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_SPLIT_K_MODE, &splitKMode, sizeof(splitKMode)))
+        CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
+            &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_SPLIT_K_BUFFERS, &(alginfo.splitBufs), sizeof(alginfo.splitBufs)))
+    }
+    size_t workspace_size = 0;
     CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&cusparselt_handle_, &plan, &matmul, &alg_sel, workspace_size))
 
     void*        d_workspace = nullptr;

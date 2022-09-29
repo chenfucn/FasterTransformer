@@ -426,7 +426,7 @@ void generate_encoder_gemm_config(
         if (line_count == 0) {
             fprintf(
                 fd,
-                "batch_size, seq_len, head_num, size_per_head dataType ### batchCount, m, n, k, algoId, exec_time\n");
+                "batch_size, seq_len, head_num, size_per_head dataType ### batchCount, m, n, k, algoId, splitK, splitKMode, splitKBuffers, exec_time\n");
         }
         cusparseLtHandle_t handle;
         CHECK_CUSPARSE(cusparseLtInit(&handle));
@@ -462,62 +462,128 @@ void generate_encoder_gemm_config(
             }
 
             float exec_time = 99999.0f;
-            int   fast_algo = 0;
-            for (int alg = 0; alg < 4; ++alg) {
-                cudaDeviceSynchronize();
-                cusparseLtMatDescriptor_t matA, matB, matC;
-                void*                     d_workspace = nullptr;
-                int                       num_streams = 1;
-                cudaStream_t              streams[1]  = {stream};
-                CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(
+            cusparseLtMatDescriptor_t matA, matB, matC;
+            void*                     d_workspace = nullptr;
+            int                       num_streams = 1;
+            cudaStream_t              streams[1]  = {stream};
+            CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(
                     &handle, &matA, m, k, m, alignment, CUDA_R_16F, order, CUSPARSELT_SPARSITY_50_PERCENT))
-                CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matB, k, n, k, alignment, CUDA_R_16F, order))
-                CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matC, m, n, m, alignment, CUDA_R_16F, order))
-                gettimeofday(&start, NULL);
-                for (int ite = 0; ite < ites; ++ite) {
-                    // initializing MatDesc takes a lot of time
-                    // and these descs can be stored to other place
-                    // whereas storing MatMulPlan to other place will cause errors
-                    cusparseLtMatmulDescriptor_t   matmul;
-                    cusparseLtMatmulAlgSelection_t alg_sel;
-                    cusparseLtMatmulPlan_t         plan;
-                    CHECK_CUSPARSE(cusparseLtMatmulDescriptorInit(
+            CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matB, k, n, k, alignment, CUDA_R_16F, order))
+            CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matC, m, n, m, alignment, CUDA_R_16F, order))
+            cusparseLtMatmulDescriptor_t   matmul;
+            cusparseLtMatmulAlgSelection_t alg_sel;
+            cusparseLtMatmulPlan_t         plan;
+            CHECK_CUSPARSE(cusparseLtMatmulDescriptorInit(
                         &handle, &matmul, opA, opB, &matA, &matB, &matC, &matC, compute_type))
-                    CHECK_CUSPARSE(
-                        cusparseLtMatmulAlgSelectionInit(&handle, &alg_sel, &matmul, CUSPARSELT_MATMUL_ALG_DEFAULT))
-                    CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
-                        &handle, &alg_sel, CUSPARSELT_MATMUL_ALG_CONFIG_ID, &alg, sizeof(alg)))
-                    size_t workspace_size;
-                    CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&handle, &alg_sel, &workspace_size))
-                    CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&handle, &plan, &matmul, &alg_sel, workspace_size))
-                    CHECK_CUSPARSE(cusparseLtMatmul(&handle,
-                                                    &plan,
-                                                    &alpha2,
-                                                    dA_compressed,
-                                                    d_B,
-                                                    &beta2,
-                                                    d_C,
-                                                    d_C,
-                                                    d_workspace,
-                                                    streams,
-                                                    num_streams))
-                    CHECK_CUSPARSE(cusparseLtMatmulPlanDestroy(&plan))
-                }
-                cudaDeviceSynchronize();
-                gettimeofday(&end, NULL);
-                printf("algo_%d costs %.3fms \n", alg, diffTime(start, end) / ites);
-                if (diffTime(start, end) < exec_time) {
-                    exec_time = diffTime(start, end);
-                    fast_algo = alg;
-                }
+            CHECK_CUSPARSE(cusparseLtMatmulAlgSelectionInit(&handle, &alg_sel, &matmul, CUSPARSELT_MATMUL_ALG_DEFAULT))
+            size_t workspace_size = 0;
+            CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&handle, &plan, &matmul, &alg_sel, workspace_size))
+            // Search the best kernel
+            CHECK_CUSPARSE( cusparseLtMatmulSearch(&handle, &plan, &alpha2,
+                                           dA_compressed, d_B, &beta2,
+                                           d_C, d_C, d_workspace,
+                                           streams, num_streams) )
+
+            // -----------------------------------------------------
+            // TODO!! test run, to be deleted
+            gettimeofday(&start, NULL);
+            for (int ite = 0; ite < ites; ++ite) {
+                CHECK_CUSPARSE(cusparseLtMatmul(&handle,
+                                                &plan,
+                                                &alpha2,
+                                                dA_compressed,
+                                                d_B,
+                                                &beta2,
+                                                d_C,
+                                                d_C,
+                                                d_workspace,
+                                                streams,
+                                                num_streams))
             }
+            cudaDeviceSynchronize();
+            gettimeofday(&end, NULL);
+            exec_time = diffTime(start, end);
+            printf("testrun %.3fms \n", exec_time / ites);
+            // ----------------------------------------------------
+
+
+
+            int fast_algo = 0;
+            CHECK_CUSPARSE( cusparseLtMatmulAlgGetAttribute(
+                                           &handle, &alg_sel,
+                                           CUSPARSELT_MATMUL_ALG_CONFIG_ID,
+                                           &fast_algo, sizeof(fast_algo)) )
+            int splitk = 0;
+            CHECK_CUSPARSE( cusparseLtMatmulAlgGetAttribute(
+                                           &handle, &alg_sel,
+                                           CUSPARSELT_MATMUL_SPLIT_K,
+                                           &splitk, sizeof(splitk)) )
+            cusparseLtSplitKMode_t splitKMode;
+            CHECK_CUSPARSE( cusparseLtMatmulAlgGetAttribute(
+                                           &handle, &alg_sel,
+                                           CUSPARSELT_MATMUL_SPLIT_K_MODE,
+                                           &splitKMode, sizeof(splitKMode)) )
+            int splitBufs = 0;
+            CHECK_CUSPARSE( cusparseLtMatmulAlgGetAttribute(
+                                           &handle, &alg_sel,
+                                           CUSPARSELT_MATMUL_SPLIT_K_BUFFERS,
+                                           &splitBufs, sizeof(splitBufs)) )
+            CHECK_CUSPARSE( cusparseLtMatmulPlanDestroy(&plan) )
+
+            gettimeofday(&start, NULL);
+            for (int ite = 0; ite < ites; ++ite) {
+                // initializing MatDesc takes a lot of time
+                // and these descs can be stored to other place
+                // whereas storing MatMulPlan to other place will cause errors
+                cusparseLtMatmulDescriptor_t   matmul;
+                cusparseLtMatmulAlgSelection_t alg_sel;
+                cusparseLtMatmulPlan_t         plan;
+                CHECK_CUSPARSE(cusparseLtMatmulDescriptorInit(
+                        &handle, &matmul, opA, opB, &matA, &matB, &matC, &matC, compute_type))
+                CHECK_CUSPARSE(cusparseLtMatmulAlgSelectionInit(&handle, &alg_sel, &matmul, CUSPARSELT_MATMUL_ALG_DEFAULT))
+                CHECK_CUSPARSE( cusparseLtMatmulAlgSetAttribute(
+                                           &handle, &alg_sel,
+                                           CUSPARSELT_MATMUL_ALG_CONFIG_ID,
+                                           &fast_algo, sizeof(fast_algo)) )
+                CHECK_CUSPARSE( cusparseLtMatmulAlgSetAttribute(
+                                           &handle, &alg_sel,
+                                           CUSPARSELT_MATMUL_SPLIT_K,
+                                           &splitk, sizeof(splitk)) )
+                CHECK_CUSPARSE( cusparseLtMatmulAlgSetAttribute(
+                                           &handle, &alg_sel,
+                                           CUSPARSELT_MATMUL_SPLIT_K_MODE,
+                                           &splitKMode, sizeof(splitKMode)) )
+                CHECK_CUSPARSE( cusparseLtMatmulAlgSetAttribute(
+                                           &handle, &alg_sel,
+                                           CUSPARSELT_MATMUL_SPLIT_K_BUFFERS,
+                                           &splitBufs, sizeof(splitBufs)) )
+                const size_t workspace_size = 0;
+                CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&handle, &plan, &matmul, &alg_sel, workspace_size))
+                CHECK_CUSPARSE(cusparseLtMatmul(&handle,
+                                                &plan,
+                                                &alpha2,
+                                                dA_compressed,
+                                                d_B,
+                                                &beta2,
+                                                d_C,
+                                                d_C,
+                                                d_workspace,
+                                                streams,
+                                                num_streams))
+                CHECK_CUSPARSE(cusparseLtMatmulPlanDestroy(&plan))
+            }
+            cudaDeviceSynchronize();
+            gettimeofday(&end, NULL);
+            exec_time = diffTime(start, end);
+            printf("algo_%d costs %.3fms \n", fast_algo, exec_time / ites);
+
             exec_time /= ites;
             if (exec_time >= exec_times[i]) {
                 fast_algo = -1;
             }
             printf("fast_algo %d\n", fast_algo);
             fprintf(fd,
-                    "%d %d %d %d %d ### %d %d %d %d %d %f\n",
+                    "%d %d %d %d %d ### %d %d %d %d %d %d %d %d %f\n",
                     batch_size,
                     seq_len,
                     head_num,
@@ -528,6 +594,9 @@ void generate_encoder_gemm_config(
                     n,
                     k,
                     fast_algo,
+                    splitk,
+                    splitKMode,
+                    splitBufs,
                     exec_time);
             cudaFree(dA_compressed);
         }

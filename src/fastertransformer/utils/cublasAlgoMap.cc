@@ -145,7 +145,7 @@ void cublasAlgoMap::loadSpGemmConfig()
     }
     sp_algo_map_.clear();
     int   batch_size, seq_len, head_num, size_per_head, data_type;
-    int   batchCount, m, n, k, algoId;
+    int   batchCount, m, n, k, algoId, splitK, splitKMode, splitBufs;
     float exec_time;
     char  tmp[1024];
     if (!fgets(tmp, 1024, fd)) {
@@ -153,7 +153,7 @@ void cublasAlgoMap::loadSpGemmConfig()
         exit(-1);
     }
     while (fscanf(fd,
-                  "%d %d %d %d %d ### %d %d %d %d %d %f\n",
+                  "%d %d %d %d %d ### %d %d %d %d %d %d %d %d %f\n",
                   &batch_size,
                   &seq_len,
                   &head_num,
@@ -164,17 +164,27 @@ void cublasAlgoMap::loadSpGemmConfig()
                   &n,
                   &k,
                   &algoId,
+                  &splitK,
+                  &splitKMode,
+                  &splitBufs,
                   &exec_time)
            != EOF) {
         char mark[256];
         sprintf(mark, "%d_%d_%d_%d", batchCount, m, n, k);
         std::string markStr(mark);
-        sp_algo_map_[markStr] = algoId;
+        // workspaceSize should be zero
+        if (sp_algo_map_.find(markStr) == sp_algo_map_.end()) {
+            sp_algo_map_[markStr].algoId      = algoId;
+            sp_algo_map_[markStr].splitK      = splitK;
+            sp_algo_map_[markStr].splitKMode  = splitKMode;
+            sp_algo_map_[markStr].splitBufs   = splitBufs;
+        }
     }
     fclose(fd);
 }
 
-int cublasAlgoMap::getSpAlgo(const int batch_count, const int m, const int n, const int k)
+cusparseLtMatmulAlgo_info
+cublasAlgoMap::getSpAlgo(const int batch_count, const int m, const int n, const int k)
 {
     char mark[256];
     sprintf(mark, "%d_%d_%d_%d", batch_count, m, n, k);
@@ -182,8 +192,12 @@ int cublasAlgoMap::getSpAlgo(const int batch_count, const int m, const int n, co
         return sp_algo_map_[mark];
     }
     else {
-        // for remove padding, select algo 1 for simplicity
-        return 0;
+        cusparseLtMatmulAlgo_info info;
+        info.algoId = -2;
+        info.splitBufs = 0;
+        info.splitK = 0;
+        info.splitKMode = 1;
+        return info;
     }
 }
 
@@ -196,7 +210,7 @@ bool cublasAlgoMap::isUseSparse(const int batch_count, const int m, const int n,
     char mark[256];
     sprintf(mark, "%d_%d_%d_%d", batch_count, m, n, k);
     if (sp_algo_map_.find(mark) != sp_algo_map_.end()) {
-        return sp_algo_map_[mark] != -1;
+        return sp_algo_map_[mark].algoId != -1;
     }
     else {
         // no gemm test case, choose sparse according to sparse flag
