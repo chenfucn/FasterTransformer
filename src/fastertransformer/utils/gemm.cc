@@ -971,6 +971,8 @@ void SpGemm::gemm(const GemmOp   transa,
     CHECK_CUSPARSE(
         cusparseLtMatmulAlgSelectionInit(&cusparselt_handle_, &alg_sel, &matmul, CUSPARSELT_MATMUL_ALG_DEFAULT));
     cusparseLtMatmulAlgo_info alginfo = cublas_algo_map_->getSpAlgo(1, a_rows, b_cols, a_cols);
+    size_t workspace_size = 0;
+    CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&cusparselt_handle_, &plan, &matmul, &alg_sel, workspace_size));
     if (alginfo.algoId >= 0){
         CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
             &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_ALG_CONFIG_ID, &(alginfo.algoId), sizeof(alginfo.algoId)))
@@ -982,8 +984,6 @@ void SpGemm::gemm(const GemmOp   transa,
         CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
             &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_SPLIT_K_BUFFERS, &(alginfo.splitBufs), sizeof(alginfo.splitBufs)))
     }
-    size_t workspace_size = 0;
-    CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&cusparselt_handle_, &plan, &matmul, &alg_sel, workspace_size));
 
     void*        d_workspace = nullptr;  // Can we use the workspace of the class?
     int          num_streams = 1;

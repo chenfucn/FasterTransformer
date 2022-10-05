@@ -540,6 +540,8 @@ void cublasINT8MMWrapper::SpGemm(
     CHECK_CUSPARSE(
         cusparseLtMatmulAlgSelectionInit(&cusparselt_handle_, &alg_sel, &matmul, CUSPARSELT_MATMUL_ALG_DEFAULT))
     cusparseLtMatmulAlgo_info alginfo = cublas_algo_map_->getSpAlgo(1, num_A_rows, num_B_cols, num_A_cols);
+    size_t workspace_size = 0;
+    CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&cusparselt_handle_, &plan, &matmul, &alg_sel, workspace_size))
     if (alginfo.algoId >= 0){
         CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
             &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_ALG_CONFIG_ID, &(alginfo.algoId), sizeof(alginfo.algoId)))
@@ -551,8 +553,6 @@ void cublasINT8MMWrapper::SpGemm(
         CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
             &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_SPLIT_K_BUFFERS, &(alginfo.splitBufs), sizeof(alginfo.splitBufs)))
     }
-    size_t workspace_size = 0;
-    CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&cusparselt_handle_, &plan, &matmul, &alg_sel, workspace_size))
 
     void*        d_workspace = nullptr;
     int          num_streams = 1;
