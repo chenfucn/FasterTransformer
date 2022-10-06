@@ -508,9 +508,10 @@ void generate_encoder_gemm_config(
                                                     CUSPARSELT_MATMUL_SPLIT_K_BUFFERS,
                                                     &bufs, sizeof(bufs)) )
                             CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&handle, &plan, &matmul, &alg_sel, workspace_size))
+                            bool success = true;
                             gettimeofday(&start, NULL);
                             for (int ite = 0; ite < ites; ++ite) {
-                                CHECK_CUSPARSE(cusparseLtMatmul(&handle,
+                                cusparseStatus_t status = cusparseLtMatmul(&handle,
                                                                 &plan,
                                                                 &alpha2,
                                                                 dA_compressed,
@@ -520,17 +521,23 @@ void generate_encoder_gemm_config(
                                                                 d_C,
                                                                 d_workspace,
                                                                 streams,
-                                                                num_streams))
+                                                                num_streams);
+                                if (status != CUSPARSE_STATUS_SUCCESS) {
+                                    success = false;
+                                    break;
+                                }
                             }
-                            cudaDeviceSynchronize();
-                            gettimeofday(&end, NULL);
-                            float test_time = diffTime(start, end);
-                            printf("Matmul search algo %d, splitk %d, mode %d, bufs %d, %.3fms \n", algo, splitk, mode, bufs, test_time / ites);
-                            if (test_time < exec_time){
-                                fast_algo = algo;
-                                fast_splitk = splitk;
-                                fast_splitKMode = mode;
-                                fast_splitBufs = bufs;
+                            if (success){
+                                cudaDeviceSynchronize();
+                                gettimeofday(&end, NULL);
+                                float test_time = diffTime(start, end);
+                                printf("Matmul search algo %d, splitk %d, mode %d, bufs %d, %.3fms \n", algo, splitk, mode, bufs, test_time / ites);
+                                if (test_time < exec_time){
+                                    fast_algo = algo;
+                                    fast_splitk = splitk;
+                                    fast_splitKMode = mode;
+                                    fast_splitBufs = bufs;
+                                }
                             }
                             CHECK_CUSPARSE( cusparseLtMatmulPlanDestroy(&plan) )
                         }
