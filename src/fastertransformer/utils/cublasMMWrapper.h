@@ -27,15 +27,24 @@
 #pragma once
 namespace fastertransformer {
 
+#ifdef SPARSITY_ENABLED
+typedef struct cuspCxt_t {
+    cusparseLtMatDescriptor_t      matA;
+    cusparseLtMatDescriptor_t      matB;
+    cusparseLtMatDescriptor_t      matC;
+    cusparseLtMatmulDescriptor_t   matmul;
+    cusparseLtMatmulAlgSelection_t alg_sel;
+    cusparseLtMatmulPlan_t         plan;
+} cuspContext;
+#endif
+
 class cublasMMWrapper {
 private:
     cublasHandle_t   cublas_handle_;
     cublasLtHandle_t cublaslt_handle_;
 #ifdef SPARSITY_ENABLED
-    cusparseLtHandle_t                               cusparselt_handle_;
-    std::map<std::string, cusparseLtMatDescriptor_t> sp_mat_A_desc_map_;
-    std::map<std::string, cusparseLtMatDescriptor_t> sp_mat_B_desc_map_;
-    std::map<std::string, cusparseLtMatDescriptor_t> sp_mat_C_desc_map_;
+    cusparseLtHandle_t                 cusparselt_handle_;
+    std::map<std::string, cuspContext> sp_cxt_map_;
 #endif
 
     cudaDataType_t Atype_;
