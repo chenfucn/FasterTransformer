@@ -460,6 +460,7 @@ void generate_encoder_gemm_config(
                 CHECK_CUSPARSE(cusparseLtSpMMACompressedSize2(&handle, &matA, &compressed_size))
                 check_cuda_error(cudaMalloc((void**)&dA_compressed, compressed_size));
                 CHECK_CUSPARSE(cusparseLtSpMMACompress2(&handle, &matA, true, opA, d_A, dA_compressed, stream))
+                CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matA))
             }
 
             float                     exec_time = 99999.0f;
@@ -467,11 +468,6 @@ void generate_encoder_gemm_config(
             void*                     d_workspace = nullptr;
             int                       num_streams = 1;
             cudaStream_t              streams[1]  = {stream};
-            cusparseLtMatDescriptor_t matA, matB, matC;
-            CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(
-                    &handle, &matA, m, k, m, alignment, CUDA_R_16F, order, CUSPARSELT_SPARSITY_50_PERCENT))
-            CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matB, k, n, k, alignment, CUDA_R_16F, order))
-            CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matC, m, n, m, alignment, CUDA_R_16F, order))
 
             // Search for best algo config
             int fast_algo = 0;
@@ -485,6 +481,12 @@ void generate_encoder_gemm_config(
                     for (int mode=1; mode <= 2; mode++){
                         cusparseLtSplitKMode_t mode_t = (cusparseLtSplitKMode_t)mode;
                         for (int bufs = 0; bufs < splitk; bufs++){
+                            cusparseStatus_t status;
+                            cusparseLtMatDescriptor_t matA, matB, matC;
+                            CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(
+                                    &handle, &matA, m, k, m, alignment, CUDA_R_16F, order, CUSPARSELT_SPARSITY_50_PERCENT))
+                            CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matB, k, n, k, alignment, CUDA_R_16F, order))
+                            CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matC, m, n, m, alignment, CUDA_R_16F, order))
                             cusparseLtMatmulDescriptor_t   matmul;
                             cusparseLtMatmulAlgSelection_t alg_sel;
                             cusparseLtMatmulPlan_t         plan;
@@ -507,11 +509,19 @@ void generate_encoder_gemm_config(
                                                     &handle, &alg_sel,
                                                     CUSPARSELT_MATMUL_SPLIT_K_BUFFERS,
                                                     &bufs, sizeof(bufs)) )
-                            CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&handle, &plan, &matmul, &alg_sel, workspace_size))
+                            status = cusparseLtMatmulPlanInit(&handle, &plan, &matmul, &alg_sel, workspace_size);
+                            if (status != CUSPARSE_STATUS_SUCCESS){
+                                auto s = cusparseLtMatmulPlanDestroy(&plan);
+                                cusparseLtMatDescriptorDestroy(&matA);
+                                cusparseLtMatDescriptorDestroy(&matB);
+                                cusparseLtMatDescriptorDestroy(&matC);
+                                printf("plan init fail %d %d\n", status, s);
+                                continue;
+                            }
                             bool success = true;
                             gettimeofday(&start, NULL);
                             for (int ite = 0; ite < ites; ++ite) {
-                                cusparseStatus_t status = cusparseLtMatmul(&handle,
+                                status = cusparseLtMatmul(&handle,
                                                                 &plan,
                                                                 &alpha2,
                                                                 dA_compressed,
@@ -524,6 +534,7 @@ void generate_encoder_gemm_config(
                                                                 num_streams);
                                 if (status != CUSPARSE_STATUS_SUCCESS) {
                                     success = false;
+                                    printf("Fail algo %d, splitk %d, mode %d, bufs %d\n", algo, splitk, mode, bufs);
                                     break;
                                 }
                             }
@@ -533,6 +544,7 @@ void generate_encoder_gemm_config(
                                 float test_time = diffTime(start, end);
                                 printf("Matmul search algo %d, splitk %d, mode %d, bufs %d, %.3fms \n", algo, splitk, mode, bufs, test_time / ites);
                                 if (test_time < exec_time){
+                                    exec_time = test_time;
                                     fast_algo = algo;
                                     fast_splitk = splitk;
                                     fast_splitKMode = mode;
@@ -540,6 +552,9 @@ void generate_encoder_gemm_config(
                                 }
                             }
                             CHECK_CUSPARSE( cusparseLtMatmulPlanDestroy(&plan) )
+                            CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matA))
+                            CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matB))
+                            CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matC))
                         }
                     }
                 }
