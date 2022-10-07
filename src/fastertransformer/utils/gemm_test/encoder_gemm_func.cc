@@ -444,7 +444,7 @@ void generate_encoder_gemm_config(
         cudaStream_t        stream       = 0;
         float               alpha2       = 1.0f;
         float               beta2        = 0.0f;
-        for (int i = 1; i < spgemm_num; ++i) {
+        for (int i = 0; i < spgemm_num; ++i) {
             cusparseLtHandle_t handle;
             CHECK_CUSPARSE(cusparseLtInit(&handle));
             // to be compatible with spgemm wrapper, we let A be the weight matrix
