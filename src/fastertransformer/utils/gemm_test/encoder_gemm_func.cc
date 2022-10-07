@@ -428,8 +428,6 @@ void generate_encoder_gemm_config(
                 fd,
                 "batch_size, seq_len, head_num, size_per_head dataType ### batchCount, m, n, k, algoId, splitK, splitKMode, splitKBuffers, exec_time\n");
         }
-        cusparseLtHandle_t handle;
-        CHECK_CUSPARSE(cusparseLtInit(&handle));
         cusparseOrder_t     order        = CUSPARSE_ORDER_COL;
         cusparseOperation_t opA          = CUSPARSE_OPERATION_NON_TRANSPOSE;
         cusparseOperation_t opB          = CUSPARSE_OPERATION_NON_TRANSPOSE;
@@ -438,7 +436,9 @@ void generate_encoder_gemm_config(
         cudaStream_t        stream       = 0;
         float               alpha2       = 1.0f;
         float               beta2        = 0.0f;
-        for (int i = 0; i < spgemm_num; ++i) {
+        for (int i = 1; i < spgemm_num; ++i) {
+            cusparseLtHandle_t handle;
+            CHECK_CUSPARSE(cusparseLtInit(&handle));
             // to be compatible with spgemm wrapper, we let A be the weight matrix
             // so m and n are swapped
             // A: mxk B: kxn C:mxn
@@ -582,8 +582,8 @@ void generate_encoder_gemm_config(
                     fast_splitBufs,
                     exec_time);
             cudaFree(dA_compressed);
+            CHECK_CUSPARSE(cusparseLtDestroy(&handle))
         }
-        CHECK_CUSPARSE(cusparseLtDestroy(&handle))
         fclose(fd);
         printf("***cusparseLt Gemm Testing End***\n");
     }
