@@ -444,9 +444,9 @@ void generate_encoder_gemm_config(
         cudaStream_t        stream       = 0;
         float               alpha2       = 1.0f;
         float               beta2        = 0.0f;
+        cusparseLtHandle_t  handle;
+        CHECK_CUSPARSE(cusparseLtInit(&handle));
         for (int i = 0; i < spgemm_num; ++i) {
-            cusparseLtHandle_t handle;
-            CHECK_CUSPARSE(cusparseLtInit(&handle));
             // to be compatible with spgemm wrapper, we let A be the weight matrix
             // so m and n are swapped
             // A: mxk B: kxn C:mxn
@@ -474,114 +474,124 @@ void generate_encoder_gemm_config(
                 CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matA))
             }
 
-            float                     exec_time = 99999.0f;
             int                       num_streams = 1;
             cudaStream_t              streams[1]  = {stream};
 
             // Search for best algo config
             int fast_algo = 0;
             int fast_splitk = 1;
-            int fast_splitKMode = 1;
             int fast_splitBufs = 0;
-            const int splitk_limit = k >> 4;
-            cudaDeviceSynchronize();
-            for (int algo=0; algo < 4; algo++) {
-                for (int splitk = 1; splitk < splitk_limit; splitk = splitk << 1){
-                    for (int mode=1; mode <= 2; mode++){
-                        if (mode > splitk) break;
-                        cusparseLtSplitKMode_t mode_t = (cusparseLtSplitKMode_t)mode;
-                        for (int bufs = splitk == 1 ? 0 : 1; bufs < splitk; bufs++){
-                            size_t                    workspace_size = 0;
-                            cusparseStatus_t          status;
-                            cusparseLtMatDescriptor_t matA, matB, matC;
-                            CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(
-                                    &handle, &matA, m, k, m, alignment, CUDA_R_16F, order, CUSPARSELT_SPARSITY_50_PERCENT))
-                            CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matB, k, n, k, alignment, CUDA_R_16F, order))
-                            CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matC, m, n, m, alignment, CUDA_R_16F, order))
-                            cusparseLtMatmulDescriptor_t   matmul;
-                            cusparseLtMatmulAlgSelection_t alg_sel;
-                            cusparseLtMatmulPlan_t         plan;
-                            CHECK_CUSPARSE(cusparseLtMatmulDescriptorInit(
-                                        &handle, &matmul, opA, opB, &matA, &matB, &matC, &matC, compute_type))
-                            CHECK_CUSPARSE(cusparseLtMatmulAlgSelectionInit(&handle, &alg_sel, &matmul, CUSPARSELT_MATMUL_ALG_DEFAULT))
-                            CHECK_CUSPARSE( cusparseLtMatmulAlgSetAttribute(
-                                                    &handle, &alg_sel,
-                                                    CUSPARSELT_MATMUL_ALG_CONFIG_ID,
-                                                    &algo, sizeof(algo)) )
-                            CHECK_CUSPARSE( cusparseLtMatmulAlgSetAttribute(
-                                                    &handle, &alg_sel,
-                                                    CUSPARSELT_MATMUL_SPLIT_K,
-                                                    &splitk, sizeof(splitk)) )
-                            CHECK_CUSPARSE( cusparseLtMatmulAlgSetAttribute(
-                                                    &handle, &alg_sel,
-                                                    CUSPARSELT_MATMUL_SPLIT_K_MODE,
-                                                    &mode_t, sizeof(mode_t)) )
-                            CHECK_CUSPARSE( cusparseLtMatmulAlgSetAttribute(
-                                                    &handle, &alg_sel,
-                                                    CUSPARSELT_MATMUL_SPLIT_K_BUFFERS,
-                                                    &bufs, sizeof(bufs)) )
-                            status = cusparseLtMatmulPlanInit(&handle, &plan, &matmul, &alg_sel, workspace_size);
-                            if (status != CUSPARSE_STATUS_SUCCESS){
-                                auto s = cusparseLtMatmulPlanDestroy(&plan);
-                                cusparseLtMatDescriptorDestroy(&matA);
-                                cusparseLtMatDescriptorDestroy(&matB);
-                                cusparseLtMatDescriptorDestroy(&matC);
-                                printf("plan init fail %d %d\n", status, s);
-                                continue;
-                            }
-                            CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&handle, &plan, &workspace_size));
-                            if (workspace_size > max_workspace_size){
-                                cudaFree(d_workspace);
-                                max_workspace_size = workspace_size;
-                                check_cuda_error(cudaMalloc(&d_workspace, max_workspace_size));
-                            }
-                            bool success = true;
-                            gettimeofday(&start, NULL);
-                            for (int ite = 0; ite < ites; ++ite) {
-                                status = cusparseLtMatmul(&handle,
-                                                                &plan,
-                                                                &alpha2,
-                                                                dA_compressed,
-                                                                d_B,
-                                                                &beta2,
-                                                                d_C,
-                                                                d_C,
-                                                                d_workspace,
-                                                                streams,
-                                                                num_streams);
-                                if (status != CUSPARSE_STATUS_SUCCESS) {
-                                    success = false;
-                                    printf("Fail algo %d, splitk %d, mode %d, bufs %d, workspace %zu\n", algo, splitk, mode, bufs, workspace_size);
-                                    break;
-                                }
-                            }
-                            if (success){
-                                cudaDeviceSynchronize();
-                                gettimeofday(&end, NULL);
-                                float test_time = diffTime(start, end);
-                                printf("Matmul search algo %d, splitk %d, mode %d, bufs %d, workspace %zu, %.3fms \n", algo, splitk, mode, bufs, workspace_size, test_time / ites);
-                                if (test_time < exec_time){
-                                    exec_time = test_time;
-                                    fast_algo = algo;
-                                    fast_splitk = splitk;
-                                    fast_splitKMode = mode;
-                                    fast_splitBufs = bufs;
-                                }
-                            }
-                            CHECK_CUSPARSE( cusparseLtMatmulPlanDestroy(&plan) )
-                            CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matA))
-                            CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matB))
-                            CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matC))
-                        }
-                    }
+            cusparseLtSplitKMode_t mode_t;
+            {
+                size_t                    workspace_size = 0;
+                cusparseLtMatDescriptor_t matA, matB, matC;
+                CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(
+                        &handle, &matA, m, k, m, alignment, CUDA_R_16F, order, CUSPARSELT_SPARSITY_50_PERCENT))
+                CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matB, k, n, k, alignment, CUDA_R_16F, order))
+                CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matC, m, n, m, alignment, CUDA_R_16F, order))
+                cusparseLtMatmulDescriptor_t   matmul;
+                cusparseLtMatmulAlgSelection_t alg_sel;
+                cusparseLtMatmulPlan_t         plan;
+                CHECK_CUSPARSE(cusparseLtMatmulDescriptorInit(
+                            &handle, &matmul, opA, opB, &matA, &matB, &matC, &matC, compute_type))
+                CHECK_CUSPARSE(cusparseLtMatmulAlgSelectionInit(&handle, &alg_sel, &matmul, CUSPARSELT_MATMUL_ALG_DEFAULT))
+                CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&handle, &plan, &matmul, &alg_sel, workspace_size))
+                CHECK_CUSPARSE(cusparseLtMatmulSearch(&handle, &plan, &alpha2,
+                                            dA_compressed, d_B, &beta2,
+                                            d_C, d_C, d_workspace,
+                                            streams, num_streams) )
+                CHECK_CUSPARSE( cusparseLtMatmulAlgGetAttribute(
+                                        &handle, &alg_sel,
+                                        CUSPARSELT_MATMUL_ALG_CONFIG_ID,
+                                        &fast_algo, sizeof(fast_algo)) )
+                CHECK_CUSPARSE( cusparseLtMatmulAlgGetAttribute(
+                                        &handle, &alg_sel,
+                                        CUSPARSELT_MATMUL_SPLIT_K,
+                                        &fast_splitk, sizeof(fast_splitk)) )
+                CHECK_CUSPARSE( cusparseLtMatmulAlgGetAttribute(
+                                        &handle, &alg_sel,
+                                        CUSPARSELT_MATMUL_SPLIT_K_MODE,
+                                        &mode_t, sizeof(mode_t)) )
+                CHECK_CUSPARSE( cusparseLtMatmulAlgGetAttribute(
+                                        &handle, &alg_sel,
+                                        CUSPARSELT_MATMUL_SPLIT_K_BUFFERS,
+                                        &fast_splitBufs, sizeof(fast_splitBufs)) )
+                CHECK_CUSPARSE(cusparseLtMatmulPlanDestroy(&plan) )
+                CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matA))
+                CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matB))
+                CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matC))
+            }
+            // test latency
+            size_t workspace_size = 0;
+            float exec_time;
+            {
+                cusparseLtMatDescriptor_t matA, matB, matC;
+                CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(
+                        &handle, &matA, m, k, m, alignment, CUDA_R_16F, order, CUSPARSELT_SPARSITY_50_PERCENT))
+                CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matB, k, n, k, alignment, CUDA_R_16F, order))
+                CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(&handle, &matC, m, n, m, alignment, CUDA_R_16F, order))
+                cusparseLtMatmulDescriptor_t   matmul;
+                cusparseLtMatmulAlgSelection_t alg_sel;
+                cusparseLtMatmulPlan_t         plan;
+                CHECK_CUSPARSE(cusparseLtMatmulDescriptorInit(
+                            &handle, &matmul, opA, opB, &matA, &matB, &matC, &matC, compute_type))
+                CHECK_CUSPARSE(cusparseLtMatmulAlgSelectionInit(&handle, &alg_sel, &matmul, CUSPARSELT_MATMUL_ALG_DEFAULT))
+
+                CHECK_CUSPARSE( cusparseLtMatmulAlgSetAttribute(
+                                        &handle, &alg_sel,
+                                        CUSPARSELT_MATMUL_ALG_CONFIG_ID,
+                                        &fast_algo, sizeof(fast_algo)) )
+                CHECK_CUSPARSE( cusparseLtMatmulAlgSetAttribute(
+                                        &handle, &alg_sel,
+                                        CUSPARSELT_MATMUL_SPLIT_K,
+                                        &fast_splitk, sizeof(fast_splitk)) )
+                CHECK_CUSPARSE( cusparseLtMatmulAlgSetAttribute(
+                                        &handle, &alg_sel,
+                                        CUSPARSELT_MATMUL_SPLIT_K_MODE,
+                                        &mode_t, sizeof(mode_t)) )
+                CHECK_CUSPARSE( cusparseLtMatmulAlgSetAttribute(
+                                        &handle, &alg_sel,
+                                        CUSPARSELT_MATMUL_SPLIT_K_BUFFERS,
+                                        &fast_splitBufs, sizeof(fast_splitBufs)) )
+                CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&handle, &plan, &matmul, &alg_sel, workspace_size))
+                CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&handle, &plan, &workspace_size));
+                if (workspace_size > max_workspace_size){
+                    cudaFree(d_workspace);
+                    max_workspace_size = workspace_size;
+                    check_cuda_error(cudaMalloc(&d_workspace, max_workspace_size));
                 }
+                bool success = true;
+                gettimeofday(&start, NULL);
+                for (int ite = 0; ite < ites; ++ite) {
+                    CHECK_CUSPARSE(cusparseLtMatmul(&handle,
+                                                    &plan,
+                                                    &alpha2,
+                                                    dA_compressed,
+                                                    d_B,
+                                                    &beta2,
+                                                    d_C,
+                                                    d_C,
+                                                    d_workspace,
+                                                    streams,
+                                                    num_streams))
+                }
+                cudaDeviceSynchronize();
+                gettimeofday(&end, NULL);
+                exec_time = diffTime(start, end);
+                printf("Matmul search algo %d, splitk %d, mode %d, bufs %d, workspace %zu, %.3fms \n",
+                    fast_algo, fast_splitk, mode_t, fast_splitBufs, workspace_size, exec_time / ites);
+                CHECK_CUSPARSE(cusparseLtMatmulPlanDestroy(&plan) )
+                CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matA))
+                CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matB))
+                CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matC))
             }
 
             exec_time /= ites;
             if (exec_time >= exec_times[i]) {
                 fast_algo = -1;
             }
-            printf("Result algo %d, splitk %d, mode %d, bufs %d, %.3fms \n", fast_algo, fast_splitk, fast_splitKMode, fast_splitBufs, exec_time);
+            printf("Result algo %d, splitk %d, mode %d, bufs %d, workspace %zu, %.3fms \n",
+                fast_algo, fast_splitk, mode_t, fast_splitBufs, workspace_size, exec_time);
             fprintf(fd,
                     "%d %d %d %d %d ### %d %d %d %d %d %d %d %d %f\n",
                     batch_size,
@@ -595,11 +605,11 @@ void generate_encoder_gemm_config(
                     k,
                     fast_algo,
                     fast_splitk,
-                    fast_splitKMode,
+                    mode_t,
                     fast_splitBufs,
                     exec_time);
-            CHECK_CUSPARSE(cusparseLtDestroy(&handle))
         }
+        CHECK_CUSPARSE(cusparseLtDestroy(&handle))
         cudaFree(dA_compressed);
         cudaFree(d_workspace);
         fclose(fd);

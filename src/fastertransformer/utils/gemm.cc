@@ -731,14 +731,11 @@ SpGemm::~SpGemm()
 {
     cusparseLtDestroy(&cusparselt_handle_);
     // Need to destroy matmul description cache.
-    for (auto& kv : a_desc_map_) {  // kv = (mark, a_desc)
-        cusparseLtMatDescriptorDestroy(&a_desc_map_[kv.first]);
-    }
-    for (auto& kv : b_desc_map_) {  // kv = (mark, b_desc)
-        cusparseLtMatDescriptorDestroy(&b_desc_map_[kv.first]);
-    }
-    for (auto& kv : c_desc_map_) {  // kv = (mark, c_desc)
-        cusparseLtMatDescriptorDestroy(&c_desc_map_[kv.first]);
+    for (auto& kv : sp_desc_map_) {
+        cusparseLtMatmulPlanDestroy(&kv.second.plan);
+        cusparseLtMatDescriptorDestroy(&kv.second.matA);
+        cusparseLtMatDescriptorDestroy(&kv.second.matB);
+        cusparseLtMatDescriptorDestroy(&kv.second.matC);
     }
 }
 
@@ -920,31 +917,19 @@ void SpGemm::gemm(const GemmOp   transa,
     const unsigned      alignment    = 16;
     cusparseComputeType compute_type = getCusparseComputeType(compute_type_);
 
-    cusparseLtMatmulDescriptor_t   matmul;
-    cusparseLtMatmulAlgSelection_t alg_sel;
-    cusparseLtMatmulPlan_t         plan;
-
     char mark[256];
     sprintf(mark, "%d_%ld_%ld_%ld_%s_%s", 1, m, n, k, getGemmOpString(transb).c_str(), getGemmOpString(transa).c_str());
-    if (a_desc_map_.find(mark) != a_desc_map_.end()) {
-        CHECK_CUSPARSE(cusparseLtMatmulDescriptorInit(&cusparselt_handle_,
-                                                      &matmul,
-                                                      opA,
-                                                      opB,
-                                                      &a_desc_map_[mark],
-                                                      &b_desc_map_[mark],
-                                                      &c_desc_map_[mark],
-                                                      &c_desc_map_[mark],
-                                                      compute_type));
-    }
-    else {
-        // initializing MatDesc takes a lot of time
-        cusparseLtMatDescriptor_t a_desc, b_desc, c_desc;
-        a_desc_map_[mark] = a_desc;
-        b_desc_map_[mark] = b_desc;
-        c_desc_map_[mark] = c_desc;
+    auto sp_cxt = sp_desc_map_.find(mark);
+    bool locked = false;
+    if (sp_cxt == sp_desc_map_.end()){
+        cusparseltContext dummy;
+        sp_desc_map_[mark] = dummy;
+        sp_cxt = sp_desc_map_.find(mark);
+        locked = true;
+        mutex_->lock();
+
         CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(&cusparselt_handle_,
-                                                          &a_desc_map_[mark],
+                                                          &sp_cxt->second.matA,
                                                           a_rows,
                                                           a_cols,
                                                           _lda,
@@ -953,44 +938,50 @@ void SpGemm::gemm(const GemmOp   transa,
                                                           order,
                                                           CUSPARSELT_SPARSITY_50_PERCENT));
         CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(
-            &cusparselt_handle_, &b_desc_map_[mark], b_rows, b_cols, _ldb, alignment, b_type, order));
+            &cusparselt_handle_, &sp_cxt->second.matB, b_rows, b_cols, _ldb, alignment, b_type, order));
         CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(
-            &cusparselt_handle_, &c_desc_map_[mark], c_rows, c_cols, ldc, alignment, c_type, order));
+            &cusparselt_handle_, &sp_cxt->second.matC, c_rows, c_cols, ldc, alignment, c_type, order));
         CHECK_CUSPARSE(cusparseLtMatmulDescriptorInit(&cusparselt_handle_,
-                                                      &matmul,
+                                                      &sp_cxt->second.matmul,
                                                       opA,
                                                       opB,
-                                                      &a_desc_map_[mark],
-                                                      &b_desc_map_[mark],
-                                                      &c_desc_map_[mark],
-                                                      &c_desc_map_[mark],
+                                                      &sp_cxt->second.matA,
+                                                      &sp_cxt->second.matB,
+                                                      &sp_cxt->second.matC,
+                                                      &sp_cxt->second.matC,
                                                       compute_type));
+        CHECK_CUSPARSE(
+            cusparseLtMatmulAlgSelectionInit(&cusparselt_handle_, &sp_cxt->second.alg_sel, &sp_cxt->second.matmul, CUSPARSELT_MATMUL_ALG_DEFAULT));
+        cusparseLtMatmulAlgo_info alginfo = cublas_algo_map_->getSpAlgo(1, a_rows, b_cols, a_cols);
+        if (alginfo.algoId >= 0){
+            CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
+                &cusparselt_handle_, &sp_cxt->second.alg_sel, CUSPARSELT_MATMUL_ALG_CONFIG_ID, &(alginfo.algoId), sizeof(alginfo.algoId)))
+            CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
+                &cusparselt_handle_, &sp_cxt->second.alg_sel, CUSPARSELT_MATMUL_SPLIT_K, &(alginfo.splitK), sizeof(alginfo.splitK)))
+            cusparseLtSplitKMode_t splitKMode = (cusparseLtSplitKMode_t)alginfo.splitKMode;
+            CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
+                &cusparselt_handle_, &sp_cxt->second.alg_sel, CUSPARSELT_MATMUL_SPLIT_K_MODE, &splitKMode, sizeof(splitKMode)))
+            CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
+                &cusparselt_handle_, &sp_cxt->second.alg_sel, CUSPARSELT_MATMUL_SPLIT_K_BUFFERS, &(alginfo.splitBufs), sizeof(alginfo.splitBufs)))
+        }
+        size_t workspace_size = 0;
+        CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&cusparselt_handle_, &sp_cxt->second.plan, &sp_cxt->second.matmul, &sp_cxt->second.alg_sel, workspace_size));
+        CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&cusparselt_handle_, &sp_cxt->second.plan, &workspace_size));
+        size_t max_workspace_size = workspace_ == nullptr ? 0 : CUBLAS_WORKSPACE_SIZE;
+        if (workspace_size > max_workspace_size){
+            throw std::runtime_error(std::string("[FT][ERROR] CUSPARSE API failed at line ")
+                                     + std::to_string(__LINE__) + " in file " + __FILE__
+                                     + ": Workspace needed " + std::to_string(workspace_size)
+                                     + " vs available " + std::to_string(max_workspace_size) + "\n");
+        }
     }
+    if (!locked)
+        mutex_->lock();
 
-    mutex_->lock();
-    CHECK_CUSPARSE(
-        cusparseLtMatmulAlgSelectionInit(&cusparselt_handle_, &alg_sel, &matmul, CUSPARSELT_MATMUL_ALG_DEFAULT));
-    cusparseLtMatmulAlgo_info alginfo = cublas_algo_map_->getSpAlgo(1, a_rows, b_cols, a_cols);
-    size_t workspace_size = 0;
-    CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&cusparselt_handle_, &plan, &matmul, &alg_sel, workspace_size));
-    if (alginfo.algoId >= 0){
-        CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
-            &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_ALG_CONFIG_ID, &(alginfo.algoId), sizeof(alginfo.algoId)))
-        CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
-            &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_SPLIT_K, &(alginfo.splitK), sizeof(alginfo.splitK)))
-        cusparseLtSplitKMode_t splitKMode = (cusparseLtSplitKMode_t)alginfo.splitKMode;
-        CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
-            &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_SPLIT_K_MODE, &splitKMode, sizeof(splitKMode)))
-        CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
-            &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_SPLIT_K_BUFFERS, &(alginfo.splitBufs), sizeof(alginfo.splitBufs)))
-    }
-
-    void*        d_workspace = nullptr;  // Can we use the workspace of the class?
     int          num_streams = 1;
     cudaStream_t streams[1]  = {stream_};
     CHECK_CUSPARSE(cusparseLtMatmul(
-        &cusparselt_handle_, &plan, &alpha, a_data, b_data, &beta, C, C, d_workspace, streams, num_streams))
-    CHECK_CUSPARSE(cusparseLtMatmulPlanDestroy(&plan))
+        &cusparselt_handle_, &sp_cxt->second.plan, &alpha, a_data, b_data, &beta, C, C, workspace_, streams, num_streams))
     mutex_->unlock();
     sync_check_cuda_error();
 }

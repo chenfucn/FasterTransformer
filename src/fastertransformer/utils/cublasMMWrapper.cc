@@ -66,6 +66,17 @@ cublasMMWrapper::cublasMMWrapper(cublasHandle_t     cublas_handle,
 cublasMMWrapper::~cublasMMWrapper()
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+#ifdef SPARSITY_ENABLED
+    mu_->lock();
+    auto iter = sp_cxt_map_.begin();
+    while (iter != sp_cxt_map_.end()){
+        cusparseLtMatmulPlanDestroy(&iter->second.plan);
+        cusparseLtMatDescriptorDestroy(&iter->second.matA);
+        cusparseLtMatDescriptorDestroy(&iter->second.matB);
+        cusparseLtMatDescriptorDestroy(&iter->second.matC);
+    }
+    mu_->unlock();
+#endif
     mu_ = nullptr;
     if (allocator_ != nullptr) {
         allocator_->free((void**)(&cublas_workspace_));
@@ -696,17 +707,27 @@ void cublasMMWrapper::SpGemm(cublasOperation_t transa,
         }
         size_t workspace_size = 0;
         CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&cusparselt_handle_, &sp_ctx->second.plan, &sp_ctx->second.matmul, &sp_ctx->second.alg_sel, workspace_size))
+        CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&cusparselt_handle_, &sp_ctx->second.plan, &workspace_size));
+        size_t max_workspace_size = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
+        if (workspace_size > max_workspace_size){
+            throw std::runtime_error(std::string("[FT][ERROR] CUSPARSE API failed at line ")
+                                     + std::to_string(__LINE__) + " in file " + __FILE__
+                                     + ": Workspace needed " + std::to_string(workspace_size)
+                                     + " vs available " + std::to_string(max_workspace_size) + "\n");
+        }
+
     }
     if (!locked)
         mu_->lock();
 
-    void*        d_workspace = nullptr;
+    void*        d_workspace = cublas_workspace_;
     int          num_streams = 1;
     cudaStream_t streams[1]  = {stream_};
     CHECK_CUSPARSE(
         cusparseLtMatmul(&cusparselt_handle_, &sp_ctx->second.plan, &_alpha, A, B, &_beta, C, C, d_workspace, streams, num_streams))
     sync_check_cuda_error();
     mu_->unlock();
+    printf("cublasMMWrapper sparse gemm triggered!\n");
 }
 
 size_t cublasMMWrapper::getSparseMatrixSize(int m, int k)

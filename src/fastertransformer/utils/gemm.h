@@ -445,6 +445,15 @@ protected:
 
 #ifdef SPARSITY_ENABLED
 
+typedef struct cusparselt_cxt_struct{
+    cusparseLtMatDescriptor_t      matA;
+    cusparseLtMatDescriptor_t      matB;
+    cusparseLtMatDescriptor_t      matC;
+    cusparseLtMatmulDescriptor_t   matmul;
+    cusparseLtMatmulAlgSelection_t alg_sel;
+    cusparseLtMatmulPlan_t         plan;
+} cusparseltContext;
+
 /**
  * A Sparse Gemm class.
  *
@@ -458,9 +467,7 @@ class SpGemm: public Gemm {
 
 protected:
     cusparseLtHandle_t                               cusparselt_handle_;
-    std::map<std::string, cusparseLtMatDescriptor_t> a_desc_map_;
-    std::map<std::string, cusparseLtMatDescriptor_t> b_desc_map_;
-    std::map<std::string, cusparseLtMatDescriptor_t> c_desc_map_;
+    std::map<std::string, cusparseltContext>         sp_desc_map_;
     bool                                             useBaseGemm(size_t batch_size, size_t m, size_t n, size_t k);
 
 public:
