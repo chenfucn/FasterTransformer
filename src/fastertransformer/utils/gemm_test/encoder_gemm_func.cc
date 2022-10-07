@@ -428,6 +428,14 @@ void generate_encoder_gemm_config(
                 fd,
                 "batch_size, seq_len, head_num, size_per_head dataType ### batchCount, m, n, k, algoId, splitK, splitKMode, splitKBuffers, exec_time\n");
         }
+
+        void*   d_workspace = nullptr;
+        size_t  max_workspace_size = (size_t)128 * 1024 * 1024;
+        check_cuda_error(cudaMalloc(&d_workspace, max_workspace_size));
+        T*      dA_compressed = nullptr;
+        size_t  max_compress_size = max_workspace_size;
+        check_cuda_error(cudaMalloc((void**)&dA_compressed, max_compress_size));
+
         cusparseOrder_t     order        = CUSPARSE_ORDER_COL;
         cusparseOperation_t opA          = CUSPARSE_OPERATION_NON_TRANSPOSE;
         cusparseOperation_t opB          = CUSPARSE_OPERATION_NON_TRANSPOSE;
@@ -449,7 +457,6 @@ void generate_encoder_gemm_config(
             T* d_A = (T*)buffer;
             T* d_B = d_A + m * k * batchCount[i];
             T* d_C = d_B + k * n * batchCount[i];
-            T* dA_compressed;
             {
                 cusparseLtMatDescriptor_t matA;
                 CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(
@@ -458,14 +465,16 @@ void generate_encoder_gemm_config(
                     cusparseLtSpMMAPrune2(&handle, &matA, true, opA, d_A, d_A, CUSPARSELT_PRUNE_SPMMA_STRIP, stream))
                 size_t compressed_size;
                 CHECK_CUSPARSE(cusparseLtSpMMACompressedSize2(&handle, &matA, &compressed_size))
-                check_cuda_error(cudaMalloc((void**)&dA_compressed, compressed_size));
+                if (compressed_size > max_compress_size){
+                    cudaFree(dA_compressed);
+                    max_compress_size = compressed_size;
+                    check_cuda_error(cudaMalloc((void**)&dA_compressed, max_compress_size));
+                }
                 CHECK_CUSPARSE(cusparseLtSpMMACompress2(&handle, &matA, true, opA, d_A, dA_compressed, stream))
                 CHECK_CUSPARSE(cusparseLtMatDescriptorDestroy(&matA))
             }
 
             float                     exec_time = 99999.0f;
-            size_t                    workspace_size = 0;
-            void*                     d_workspace = nullptr;
             int                       num_streams = 1;
             cudaStream_t              streams[1]  = {stream};
 
@@ -479,9 +488,11 @@ void generate_encoder_gemm_config(
             for (int algo=0; algo < 4; algo++) {
                 for (int splitk = 1; splitk < splitk_limit; splitk = splitk << 1){
                     for (int mode=1; mode <= 2; mode++){
+                        if (mode > splitk) break;
                         cusparseLtSplitKMode_t mode_t = (cusparseLtSplitKMode_t)mode;
-                        for (int bufs = 0; bufs < splitk; bufs++){
-                            cusparseStatus_t status;
+                        for (int bufs = splitk == 1 ? 0 : 1; bufs < splitk; bufs++){
+                            size_t                    workspace_size = 0;
+                            cusparseStatus_t          status;
                             cusparseLtMatDescriptor_t matA, matB, matC;
                             CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(
                                     &handle, &matA, m, k, m, alignment, CUDA_R_16F, order, CUSPARSELT_SPARSITY_50_PERCENT))
@@ -518,6 +529,12 @@ void generate_encoder_gemm_config(
                                 printf("plan init fail %d %d\n", status, s);
                                 continue;
                             }
+                            CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&handle, &plan, &workspace_size));
+                            if (workspace_size > max_workspace_size){
+                                cudaFree(d_workspace);
+                                max_workspace_size = workspace_size;
+                                check_cuda_error(cudaMalloc(&d_workspace, max_workspace_size));
+                            }
                             bool success = true;
                             gettimeofday(&start, NULL);
                             for (int ite = 0; ite < ites; ++ite) {
@@ -534,7 +551,7 @@ void generate_encoder_gemm_config(
                                                                 num_streams);
                                 if (status != CUSPARSE_STATUS_SUCCESS) {
                                     success = false;
-                                    printf("Fail algo %d, splitk %d, mode %d, bufs %d\n", algo, splitk, mode, bufs);
+                                    printf("Fail algo %d, splitk %d, mode %d, bufs %d, workspace %zu\n", algo, splitk, mode, bufs, workspace_size);
                                     break;
                                 }
                             }
@@ -542,7 +559,7 @@ void generate_encoder_gemm_config(
                                 cudaDeviceSynchronize();
                                 gettimeofday(&end, NULL);
                                 float test_time = diffTime(start, end);
-                                printf("Matmul search algo %d, splitk %d, mode %d, bufs %d, %.3fms \n", algo, splitk, mode, bufs, test_time / ites);
+                                printf("Matmul search algo %d, splitk %d, mode %d, bufs %d, workspace %zu, %.3fms \n", algo, splitk, mode, bufs, workspace_size, test_time / ites);
                                 if (test_time < exec_time){
                                     exec_time = test_time;
                                     fast_algo = algo;
@@ -581,9 +598,10 @@ void generate_encoder_gemm_config(
                     fast_splitKMode,
                     fast_splitBufs,
                     exec_time);
-            cudaFree(dA_compressed);
             CHECK_CUSPARSE(cusparseLtDestroy(&handle))
         }
+        cudaFree(dA_compressed);
+        cudaFree(d_workspace);
         fclose(fd);
         printf("***cusparseLt Gemm Testing End***\n");
     }
