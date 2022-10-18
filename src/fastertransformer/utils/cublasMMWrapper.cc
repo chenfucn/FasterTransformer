@@ -68,12 +68,12 @@ cublasMMWrapper::~cublasMMWrapper()
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 #ifdef SPARSITY_ENABLED
     mu_->lock();
-    auto iter = sp_cxt_map_.begin();
-    while (iter != sp_cxt_map_.end()){
-        cusparseLtMatmulPlanDestroy(&iter->second.plan);
-        cusparseLtMatDescriptorDestroy(&iter->second.matA);
-        cusparseLtMatDescriptorDestroy(&iter->second.matB);
-        cusparseLtMatDescriptorDestroy(&iter->second.matC);
+    for (auto& kv : sp_cxt_map_) {
+        printf("Destroying plan for %s\n", kv.first.data());
+        cusparseLtMatmulPlanDestroy(&kv.second.plan);
+        cusparseLtMatDescriptorDestroy(&kv.second.matA);
+        cusparseLtMatDescriptorDestroy(&kv.second.matB);
+        cusparseLtMatDescriptorDestroy(&kv.second.matC);
     }
     mu_->unlock();
 #endif
@@ -669,6 +669,7 @@ void cublasMMWrapper::SpGemm(cublasOperation_t transa,
         sp_ctx = sp_cxt_map_.find(mark);
         locked = true;
         mu_->lock();
+        printf("Creating matrix desc for %s\n", mark);
         CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(&cusparselt_handle_,
                                                           &sp_ctx->second.matA,
                                                           num_A_rows,
@@ -695,6 +696,7 @@ void cublasMMWrapper::SpGemm(cublasOperation_t transa,
             cusparseLtMatmulAlgSelectionInit(&cusparselt_handle_, &sp_ctx->second.alg_sel, &sp_ctx->second.matmul, CUSPARSELT_MATMUL_ALG_DEFAULT))
         cusparseLtMatmulAlgo_info alginfo = cublas_algo_map_->getSpAlgo(1, num_A_rows, num_B_cols, num_A_cols);
         if (alginfo.algoId >= 0){
+            printf("Setting algo id %d to %s\n", alginfo.algoId, mark);
             CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
                 &cusparselt_handle_, &sp_ctx->second.alg_sel, CUSPARSELT_MATMUL_ALG_CONFIG_ID, &(alginfo.algoId), sizeof(alginfo.algoId)))
             CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
@@ -715,7 +717,7 @@ void cublasMMWrapper::SpGemm(cublasOperation_t transa,
                                      + ": Workspace needed " + std::to_string(workspace_size)
                                      + " vs available " + std::to_string(max_workspace_size) + "\n");
         }
-
+        printf("Created matmul plan for %s, workspace size %zu\n", mark, workspace_size);
     }
     if (!locked)
         mu_->lock();

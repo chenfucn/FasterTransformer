@@ -729,7 +729,6 @@ SpGemm::SpGemm(IAllocator* allocator, cudaStream_t stream, std::string config_fi
 
 SpGemm::~SpGemm()
 {
-    cusparseLtDestroy(&cusparselt_handle_);
     // Need to destroy matmul description cache.
     for (auto& kv : sp_desc_map_) {
         cusparseLtMatmulPlanDestroy(&kv.second.plan);
@@ -737,6 +736,7 @@ SpGemm::~SpGemm()
         cusparseLtMatDescriptorDestroy(&kv.second.matB);
         cusparseLtMatDescriptorDestroy(&kv.second.matC);
     }
+    cusparseLtDestroy(&cusparselt_handle_);
 }
 
 std::string SpGemm::toString()
